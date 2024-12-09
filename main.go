@@ -185,6 +185,9 @@ func sendNewPublishMessage(conn *websocket.Conn, msg PublishMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to encode message: %v", err)
 	}
+	logger.Info("Sending message to server",
+		zap.ByteString("rawMessage", []byte(msg.Data)),
+	)
 	return conn.WriteMessage(websocket.TextMessage, messageJSON)
 }
 
@@ -233,7 +236,6 @@ func DecodeMessage(msg []byte, conn *websocket.Conn) {
 			logger.Error("Failed to decode ServerMessage", zap.Error(err))
 			return
 		}
-		logger.Info("Message received from server", zap.Int("queueMessageNo", queueMsg.QueueMessageNo), zap.String("data", queueMsg.Data))
 		go handleServerSend(queueMsg, conn)
 
 	} else {
@@ -278,11 +280,6 @@ func handleServerSend(msg ServerSendMessage, conn *websocket.Conn) {
 	serverQueueMutex.Lock()
 	if QueueMsgNumber == -1 || msg.QueueMessageNo == 1+QueueMsgNumber {
 		QueueMsgNumber = msg.QueueMessageNo
-		// print on the terminal and send server the ACK
-		logger.Info("Message received in order",
-			zap.Int("queueMessageNo", msg.QueueMessageNo),
-			zap.String("data", msg.Data),
-		)
 		fmt.Println("[ Topic -", msg.BaseMessage.Topic, "]: ", msg.Data)
 		// Send acknowledgment for the received message
 		ack := ToServerAckMessage{
