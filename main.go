@@ -21,12 +21,12 @@ type PubSubMessage struct {
 	ClientMessageNo int    `json:"clientMessageNo"`
 }
 
-type AckMessage struct {
-	ClientMessageNo int `json:"clientMessageNo"`
+type ToServerAckMessage struct {
+	QueueMessageNo int `json:"queueMessageNo"`
 }
 
-type ServerAckMessage struct {
-	QueueMessageNo int `json:"queueMessageNo"`
+type FromServerAckMessage struct {
+	ClientMessageNo int `json:"clientMessageNo"`
 }
 
 type ServerMessage struct {
@@ -150,7 +150,7 @@ func DecodeMessage(msg []byte, conn *websocket.Conn) {
 	// Check message type based on fields
 	if _, exists := genericMessage["ClientMessageNo"]; exists {
 		// Handle AckMessage
-		var ack AckMessage
+		var ack FromServerAckMessage
 		err = json.Unmarshal(msg, &ack)
 		if err != nil {
 			log.Println("Failed to decode AckMessage:", err)
@@ -204,7 +204,7 @@ func handleServerMessage(msg ServerMessage, conn *websocket.Conn) {
 		fmt.Printf("QueueMessageNo %d received: %s\n", msg.QueueMessageNo, msg.Data)
 
 		// Send acknowledgment for the received message
-		ack := ServerAckMessage{
+		ack := ToServerAckMessage{
 			QueueMessageNo: msg.QueueMessageNo, // Use the queue number for acknowledgment
 		}
 		ackJSON, err := json.Marshal(ack)
@@ -223,7 +223,7 @@ func handleServerMessage(msg ServerMessage, conn *websocket.Conn) {
 	} else if QueueMsgNumber != -1 && msg.QueueMessageNo <= QueueMsgNumber {
 		// Duplicate or already processed message, resend acknowledgment
 		log.Printf("Duplicate or already processed message: QueueMessageNo %d\n", msg.QueueMessageNo)
-		ack := ServerAckMessage{
+		ack := ToServerAckMessage{
 			QueueMessageNo: msg.QueueMessageNo, // Use the queue number for acknowledgment
 		}
 		ackJSON, err := json.Marshal(ack)
