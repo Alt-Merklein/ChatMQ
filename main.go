@@ -10,9 +10,6 @@ import (
 	"sync"
 	"time"
 
-	//"os"
-	//"os/signal"
-
 	"github.com/gorilla/websocket"
 )
 
