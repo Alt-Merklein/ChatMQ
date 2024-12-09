@@ -35,10 +35,12 @@ type ToServerAckMessage struct {
 }
 
 type FromServerAckMessage struct {
+	BaseMessage
 	ClientMessageNo int `json:"clientMessageNo"`
 }
 
-type ServerMessage struct {
+type ServerSendMessage struct {
+	BaseMessage
 	QueueMessageNo int    `json:"queueMessageNo"`
 	Data           string `json:"data"`
 }
@@ -169,7 +171,7 @@ func DecodeMessage(msg []byte, conn *websocket.Conn) {
 	}
 
 	// Check message type based on fields
-	if _, exists := genericMessage["ClientMessageNo"]; exists {
+	if _, exists := genericMessage["clientMessageNo"]; exists {
 		// Handle AckMessage
 		var ack FromServerAckMessage
 		err = json.Unmarshal(msg, &ack)
@@ -177,18 +179,18 @@ func DecodeMessage(msg []byte, conn *websocket.Conn) {
 			log.Println("Failed to decode AckMessage:", err)
 			return
 		}
-		fmt.Println("Acknowledgment received:", ack.ClientMessageNo)
-		go handleServerAck(ack.ClientMessageNo)
-	} else if _, exists := genericMessage["QueueMessageNo"]; exists {
-		// Handle new Queue message
-		var queueMsg ServerMessage
+		fmt.Println("Acknowledgment received:", ack)
+		go handleServerAck(ack)
+	} else if _, exists := genericMessage["data"]; exists {
+		// Handle new Send Message
+		var queueMsg ServerSendMessage
 		err = json.Unmarshal(msg, &queueMsg)
 		if err != nil {
 			log.Println("Failed to decode ServerMessage:", err)
 			return
 		}
 		fmt.Println("Message received:", queueMsg.Data)
-		go handleServerMessage(queueMsg, conn)
+		go handleServerSend(queueMsg, conn)
 
 	} else {
 		// Handle unexpected or unknown message formats
@@ -196,12 +198,13 @@ func DecodeMessage(msg []byte, conn *websocket.Conn) {
 	}
 }
 
-func handleServerAck(msgAckNo int) {
+func handleServerAck(msgAck FromServerAckMessage) {
 	// Lock the buffer to ensure safe concurrent access
 	// server must ack the next unacked message
 	bufferMutex.Lock()
 	defer bufferMutex.Unlock()
-
+	msgAckNo := msgAck.ClientMessageNo
+	// IGNORING FIELDS "TOPIC" AND "ACTION" FOR NOW
 	if msgAckNo != LastAckedClientMsgNumber+1 {
 		return
 	}
@@ -217,7 +220,8 @@ func handleServerAck(msgAckNo int) {
 	}
 }
 
-func handleServerMessage(msg ServerMessage, conn *websocket.Conn) {
+func handleServerSend(msg ServerSendMessage, conn *websocket.Conn) {
+	// FOR NOW, IGNORING MSG FIELDS "TOPIC" AND "ACTION"
 	serverQueueMutex.Lock()
 	if QueueMsgNumber == -1 || msg.QueueMessageNo == 1+QueueMsgNumber {
 		QueueMsgNumber = msg.QueueMessageNo
