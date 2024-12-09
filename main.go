@@ -18,19 +18,19 @@ type PubSubMessage struct {
 	Action          string `json:"action"`
 	Topic           string `json:"topic"`
 	Data            string `json:"data"`
-	ClientMessageNo int    `json:"ClientMessageNo"`
+	ClientMessageNo int    `json:"clientMessageNo"`
 }
 
 type AckMessage struct {
-	ClientMessageNo int `json:"ClientMessageNo"`
+	ClientMessageNo int `json:"clientMessageNo"`
 }
 
 type ServerAckMessage struct {
-	QueueMessageNo int `json:"QueueMessageNo"`
+	QueueMessageNo int `json:"queueMessageNo"`
 }
 
 type ServerMessage struct {
-	QueueMessageNo int    `json:"QueueMessageNo"`
+	QueueMessageNo int    `json:"queueMessageNo"`
 	Data           string `json:"data"`
 }
 
