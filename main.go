@@ -13,15 +13,24 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Message structure for communication with the server.
-type PubSubMessage struct {
-	Action          string `json:"action"`
-	Topic           string `json:"topic"`
+// Message structure for communication with the server
+type BaseMessage struct {
+	Action string `json:"action"`
+	Topic  string `json:"topic"`
+}
+
+type PublishMessage struct {
+	BaseMessage
 	Data            string `json:"data"`
 	ClientMessageNo int    `json:"clientMessageNo"`
 }
 
+type SubscribeMessage struct {
+	BaseMessage
+}
+
 type ToServerAckMessage struct {
+	BaseMessage
 	QueueMessageNo int `json:"queueMessageNo"`
 }
 
@@ -35,18 +44,18 @@ type ServerMessage struct {
 }
 
 var (
-	UnackedClientMessageBuffer = make(map[int]PubSubMessage) // Buffer to store unacknowledged messages
-	bufferMutex                sync.Mutex                    // Mutex to protect access to the buffer
+	UnackedClientMessageBuffer = make(map[int]PublishMessage) // Buffer to store unacknowledged messages
+	bufferMutex                sync.Mutex                     // Mutex to protect access to the buffer
 	serverQueueMutex           sync.Mutex
 	ClientMsgNumber            int = -1 // Starts with 0. Identifies the current message number for the user. Also used on server acks to identify the acked message
 	LastAckedClientMsgNumber   int = -1
 	QueueMsgNumber             int = -1 //Unknown queue start location at the beginning
 	resendTimeout                  = 1 * time.Second
+	topic                      string
 )
 
 func main() {
 
-	var topic string
 	flag.StringVar(&topic, "topic", "", "Topic to subscribe to")
 	flag.Parse()
 
@@ -67,12 +76,14 @@ func main() {
 	// start receiving messages
 	go listenForServer(conn)
 
-	subscribeMsg := PubSubMessage{
-		Action: "subscribe",
-		Topic:  topic,
+	subscribeMsg := SubscribeMessage{
+		BaseMessage: BaseMessage{
+			Action: "subscribe",
+			Topic:  topic,
+		},
 	}
 
-	if err := sendNewPubSubMessage(conn, subscribeMsg); err != nil {
+	if err := sendSubscribeMessage(conn, subscribeMsg); err != nil {
 		log.Println("Failed to subscribe:", err)
 		return
 	}
@@ -98,13 +109,15 @@ func main() {
 		ClientMsgNumber++
 		bufferMutex.Unlock()
 		// Construct and send a message.
-		msg := PubSubMessage{
-			Action:          "publish", // Replace with appropriate action
-			Topic:           topic,     // Replace with user-specified or default topic
-			Data:            text,      // User input
+		msg := PublishMessage{
+			BaseMessage: BaseMessage{
+				Action: "publish", // Replace with appropriate action
+				Topic:  topic,     // Replace with user-specified or default topic
+			},
+			Data:            text, // User input
 			ClientMessageNo: ClientMsgNumber,
 		}
-		err := sendNewPubSubMessage(conn, msg)
+		err := sendNewPublishMessage(conn, msg)
 		if err != nil {
 			log.Println("Failed to send message:", err)
 		}
@@ -113,7 +126,15 @@ func main() {
 }
 
 // sendMessage encodes and sends a JSON message to the server.
-func sendNewPubSubMessage(conn *websocket.Conn, msg PubSubMessage) error {
+func sendSubscribeMessage(conn *websocket.Conn, msg SubscribeMessage) error {
+	messageJSON, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to encode message: %v", err)
+	}
+	return conn.WriteMessage(websocket.TextMessage, messageJSON)
+}
+
+func sendNewPublishMessage(conn *websocket.Conn, msg PublishMessage) error {
 
 	bufferMutex.Lock()
 	UnackedClientMessageBuffer[ClientMsgNumber] = msg
@@ -205,6 +226,10 @@ func handleServerMessage(msg ServerMessage, conn *websocket.Conn) {
 
 		// Send acknowledgment for the received message
 		ack := ToServerAckMessage{
+			BaseMessage: BaseMessage{
+				Topic:  topic,
+				Action: "ack",
+			},
 			QueueMessageNo: msg.QueueMessageNo, // Use the queue number for acknowledgment
 		}
 		ackJSON, err := json.Marshal(ack)
@@ -224,6 +249,10 @@ func handleServerMessage(msg ServerMessage, conn *websocket.Conn) {
 		// Duplicate or already processed message, resend acknowledgment
 		log.Printf("Duplicate or already processed message: QueueMessageNo %d\n", msg.QueueMessageNo)
 		ack := ToServerAckMessage{
+			BaseMessage: BaseMessage{
+				Topic:  topic,
+				Action: "ack",
+			},
 			QueueMessageNo: msg.QueueMessageNo, // Use the queue number for acknowledgment
 		}
 		ackJSON, err := json.Marshal(ack)
