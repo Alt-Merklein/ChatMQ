@@ -252,7 +252,7 @@ func resendUnackedMessages(conn *websocket.Conn) {
 		bufferMutex.Lock()
 		if LastAckedClientMsgNumber == ClientMsgNumber {
 			bufferMutex.Unlock()
-			return
+			continue
 		}
 		nextMsg := UnackedClientMessageBuffer[LastAckedClientMsgNumber+1]
 		log.Printf("Resending unacknowledged message: %+v\n", nextMsg)
