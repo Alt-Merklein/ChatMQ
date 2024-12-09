@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	//"os"
 	//"os/signal"
@@ -33,11 +34,12 @@ type ServerMessage struct {
 }
 
 var (
-	UnackedClientMessageBuffer = make(map[int]PubSubMessage)     // Buffer to store unacknowledged messages
-	bufferMutex                sync.Mutex                        // Mutex to protect access to the buffer
-	ClientMsgNumber            int                           = 0 // Starts with 0. Identifies the current message number for the user. Also used on server acks to identify the acked message
+	UnackedClientMessageBuffer = make(map[int]PubSubMessage)      // Buffer to store unacknowledged messages
+	bufferMutex                sync.Mutex                         // Mutex to protect access to the buffer
+	ClientMsgNumber            int                           = -1 // Starts with 0. Identifies the current message number for the user. Also used on server acks to identify the acked message
 	LastAckedClientMsgNumber   int                           = -1
 	QueueMsgNumber             int                           = -1 //Unknown queue start location at the beginning
+	resendTimeout                                            = 1 * time.Second
 )
 
 func main() {
@@ -68,10 +70,14 @@ func main() {
 		Topic:  topic,
 	}
 
-	if err := sendPubSubMessage(conn, subscribeMsg); err != nil {
+	if err := sendNewPubSubMessage(conn, subscribeMsg); err != nil {
 		log.Println("Failed to subscribe:", err)
 		return
 	}
+
+	// async check buffer for unacked messages
+	go resendUnackedMessages(conn)
+
 	// Read user input in a loop and send it to the server.
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -86,7 +92,9 @@ func main() {
 			fmt.Println("Exiting...")
 			break
 		}
-
+		bufferMutex.Lock()
+		ClientMsgNumber++
+		bufferMutex.Unlock()
 		// Construct and send a message.
 		msg := PubSubMessage{
 			Action:          "publish", // Replace with appropriate action
@@ -94,7 +102,7 @@ func main() {
 			Data:            text,      // User input
 			ClientMessageNo: ClientMsgNumber,
 		}
-		err := sendPubSubMessage(conn, msg)
+		err := sendNewPubSubMessage(conn, msg)
 		if err != nil {
 			log.Println("Failed to send message:", err)
 		}
@@ -103,11 +111,10 @@ func main() {
 }
 
 // sendMessage encodes and sends a JSON message to the server.
-func sendPubSubMessage(conn *websocket.Conn, msg PubSubMessage) error {
+func sendNewPubSubMessage(conn *websocket.Conn, msg PubSubMessage) error {
 
 	bufferMutex.Lock()
 	UnackedClientMessageBuffer[ClientMsgNumber] = msg
-	ClientMsgNumber++
 	bufferMutex.Unlock()
 
 	messageJSON, err := json.Marshal(msg)
@@ -173,5 +180,26 @@ func handleServerAck(msgAckNo int) {
 	} else {
 		// Log a warning if the acknowledgment is for an unknown or already removed message
 		fmt.Printf("Warning: Received acknowledgment for unknown or already removed message with AckNo %d\n", msgAckNo)
+	}
+}
+
+// resendUnackedMessages periodically resends unacknowledged messages
+func resendUnackedMessages(conn *websocket.Conn) {
+	for {
+		time.Sleep(resendTimeout) // Wait for the specified timeout
+
+		bufferMutex.Lock()
+		if LastAckedClientMsgNumber == ClientMsgNumber {
+			bufferMutex.Unlock()
+			return
+		}
+		nextMsg := UnackedClientMessageBuffer[LastAckedClientMsgNumber+1]
+		log.Printf("Resending unacknowledged message: %+v\n", nextMsg)
+		messageJSON, err := json.Marshal(nextMsg)
+		if err != nil {
+			fmt.Printf("failed to encode message: %v\n", err)
+		}
+		conn.WriteMessage(websocket.TextMessage, messageJSON)
+		bufferMutex.Unlock()
 	}
 }
