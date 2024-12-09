@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Message structure for communication with the server
@@ -49,32 +51,41 @@ var (
 	UnackedClientMessageBuffer = make(map[int]PublishMessage) // Buffer to store unacknowledged messages
 	bufferMutex                sync.Mutex                     // Mutex to protect access to the buffer
 	serverQueueMutex           sync.Mutex
-	ClientMsgNumber            int = -1 // Starts with 0. Identifies the current message number for the user. Also used on server acks to identify the acked message
-	LastAckedClientMsgNumber   int = -1
+	ClientMsgNumber            int = 0 // Starts with 0. Identifies the current message number for the user. Also used on server acks to identify the acked message
+	LastAckedClientMsgNumber   int = 0
 	QueueMsgNumber             int = -1 //Unknown queue start location at the beginning
-	resendTimeout                  = 1 * time.Second
+	resendTimeout                  = 2 * time.Second
 	topic                      string
+	logger                     *zap.Logger
+	pid                        int
 )
 
 func main() {
 
 	flag.StringVar(&topic, "topic", "", "Topic to subscribe to")
+	flag.IntVar(&pid, "pid", 0, "Process ID for logging purposes")
 	flag.Parse()
 
 	if topic == "" {
-		fmt.Println("Error: Please specify a valid topic using the -topic flag.")
+		logger.Fatal("Error: Please specify a valid topic using the -topic flag.")
+		os.Exit(1)
+	}
+	if pid == 0 {
+		logger.Fatal("Error: Please specify a valid topic using the -topic flag.")
 		os.Exit(1)
 	}
 
+	initLogger()
 	// Connect to the WebSocket server.
-	serverAddr := "ws://localhost:8080/ws"
+	serverAddr := "ws://localhost:8082/ws"
 	conn, _, err := websocket.DefaultDialer.Dial(serverAddr, nil)
 	if err != nil {
-		log.Fatalf("Failed to connect to server: %v", err)
+		logger.Fatal("Failed to connect to server", zap.String("address", serverAddr), zap.Error(err))
 	}
 	defer conn.Close()
 
-	fmt.Println("Connected to server:", serverAddr)
+	logger.Info("Connected to server", zap.String("address", serverAddr))
+
 	// start receiving messages
 	go listenForServer(conn)
 
@@ -86,7 +97,7 @@ func main() {
 	}
 
 	if err := sendSubscribeMessage(conn, subscribeMsg); err != nil {
-		log.Println("Failed to subscribe:", err)
+		logger.Error("Failed to subscribe", zap.Error(err))
 		return
 	}
 
@@ -96,15 +107,15 @@ func main() {
 	// Read user input in a loop and send it to the server.
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		fmt.Print("Enter your message (or type 'exit' to quit): ")
+		fmt.Print("")
 		if !scanner.Scan() {
-			log.Println("Error reading input:", scanner.Err())
+			logger.Error("Error reading input", zap.Error(scanner.Err()))
 			break
 		}
 
 		text := scanner.Text()
 		if text == "exit" {
-			fmt.Println("Exiting...")
+			logger.Info("Exiting...")
 			break
 		}
 		bufferMutex.Lock()
@@ -121,10 +132,38 @@ func main() {
 		}
 		err := sendNewPublishMessage(conn, msg)
 		if err != nil {
-			log.Println("Failed to send message:", err)
+			logger.Error("Failed to send message", zap.Error(err))
 		}
 	}
 
+}
+
+func initLogger() {
+	// Define log file path
+	logFilePath := fmt.Sprintf("client_logs_pid_%d.log", pid)
+
+	// Create a file writer
+	file, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+
+	// Create a Zap core that writes to the file
+	writeSyncer := zapcore.AddSync(file)
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.TimeKey = "timestamp"
+	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig), // Use JSON encoder for structured logging
+		writeSyncer,
+		zap.InfoLevel, // Set log level to Info or higher
+	)
+
+	// Add process ID as a default field in all logs
+	logger = zap.New(core).With(zap.Int("pid", pid))
+
+	defer logger.Sync()
 }
 
 // sendMessage encodes and sends a JSON message to the server.
@@ -146,6 +185,9 @@ func sendNewPublishMessage(conn *websocket.Conn, msg PublishMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to encode message: %v", err)
 	}
+	logger.Info("Sending message to server",
+		zap.ByteString("rawMessage", []byte(msg.Data)),
+	)
 	return conn.WriteMessage(websocket.TextMessage, messageJSON)
 }
 
@@ -153,9 +195,14 @@ func listenForServer(conn *websocket.Conn) {
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Println("Read error:", err)
+			logger.Error("Read error from server",
+				zap.Error(err),
+			)
 			return
 		}
+		logger.Info("Message received from server",
+			zap.ByteString("rawMessage", message),
+		)
 		// fmt.Println("Received:", string(message))
 		DecodeMessage(message, conn)
 	}
@@ -166,7 +213,7 @@ func DecodeMessage(msg []byte, conn *websocket.Conn) {
 	var genericMessage map[string]interface{}
 	err := json.Unmarshal(msg, &genericMessage) // Ensure err is declared
 	if err != nil {
-		log.Println("Failed to decode message:", err)
+		logger.Error("Failed to decode message", zap.Error(err), zap.ByteString("rawMessage", msg))
 		return
 	}
 
@@ -176,20 +223,19 @@ func DecodeMessage(msg []byte, conn *websocket.Conn) {
 		var ack FromServerAckMessage
 		err = json.Unmarshal(msg, &ack)
 		if err != nil {
-			log.Println("Failed to decode AckMessage:", err)
+			logger.Error("Failed to decode AckMessage", zap.Error(err))
 			return
 		}
-		fmt.Println("Acknowledgment received:", ack)
+		logger.Info("Acknowledgment received", zap.Int("clientMessageNo", ack.ClientMessageNo))
 		go handleServerAck(ack)
 	} else if _, exists := genericMessage["data"]; exists {
 		// Handle new Send Message
 		var queueMsg ServerSendMessage
 		err = json.Unmarshal(msg, &queueMsg)
 		if err != nil {
-			log.Println("Failed to decode ServerMessage:", err)
+			logger.Error("Failed to decode ServerMessage", zap.Error(err))
 			return
 		}
-		fmt.Println("Message received:", queueMsg.Data)
 		go handleServerSend(queueMsg, conn)
 
 	} else {
@@ -206,6 +252,10 @@ func handleServerAck(msgAck FromServerAckMessage) {
 	msgAckNo := msgAck.ClientMessageNo
 	// IGNORING FIELDS "TOPIC" AND "ACTION" FOR NOW
 	if msgAckNo != LastAckedClientMsgNumber+1 {
+		logger.Warn("Out-of-order acknowledgment received",
+			zap.Int("expected", LastAckedClientMsgNumber+1),
+			zap.Int("received", msgAck.ClientMessageNo),
+		)
 		return
 	}
 	// Check if the message with the given AckNo exists in the buffer
@@ -213,10 +263,15 @@ func handleServerAck(msgAck FromServerAckMessage) {
 		// Remove the acknowledged message from the buffer
 		delete(UnackedClientMessageBuffer, msgAckNo)
 		LastAckedClientMsgNumber++
-		fmt.Printf("Message with AckNo %d acknowledged and removed from buffer: %+v\n", msgAckNo, msg)
+		logger.Info("Acknowledged and removed message from buffer",
+			zap.Int("ackNo", msgAck.ClientMessageNo),
+			zap.Any("message", msg),
+		)
 	} else {
 		// Log a warning if the acknowledgment is for an unknown or already removed message
-		fmt.Printf("Warning: Received acknowledgment for unknown or already removed message with AckNo %d\n", msgAckNo)
+		logger.Warn("Acknowledgment for unknown or already removed message",
+			zap.Int("ackNo", msgAck.ClientMessageNo),
+		)
 	}
 }
 
@@ -225,9 +280,7 @@ func handleServerSend(msg ServerSendMessage, conn *websocket.Conn) {
 	serverQueueMutex.Lock()
 	if QueueMsgNumber == -1 || msg.QueueMessageNo == 1+QueueMsgNumber {
 		QueueMsgNumber = msg.QueueMessageNo
-		// print on the terminal and send server the ACK
-		fmt.Printf("QueueMessageNo %d received: %s\n", msg.QueueMessageNo, msg.Data)
-
+		fmt.Println("[ Topic -", msg.BaseMessage.Topic, "]: ", msg.Data)
 		// Send acknowledgment for the received message
 		ack := ToServerAckMessage{
 			BaseMessage: BaseMessage{
@@ -238,20 +291,22 @@ func handleServerSend(msg ServerSendMessage, conn *websocket.Conn) {
 		}
 		ackJSON, err := json.Marshal(ack)
 		if err != nil {
-			log.Printf("Failed to encode acknowledgment for QueueMessageNo %d: %v\n", msg.QueueMessageNo, err)
+			logger.Error("Failed to encode acknowledgment", zap.Int("queueMessageNo", msg.QueueMessageNo), zap.Error(err))
 			return
 		}
 
 		// Use the WebSocket connection to send the acknowledgment
 		if err := conn.WriteMessage(websocket.TextMessage, ackJSON); err != nil {
-			log.Printf("Failed to send acknowledgment for QueueMessageNo %d: %v\n", msg.QueueMessageNo, err)
+			logger.Error("Failed to send acknowledgment", zap.Int("queueMessageNo", msg.QueueMessageNo), zap.Error(err))
 		} else {
-			fmt.Printf("Acknowledgment sent for QueueMessageNo %d\n", msg.QueueMessageNo)
+			logger.Info("Acknowledgment sent", zap.Int("queueMessageNo", msg.QueueMessageNo))
 		}
 
 	} else if QueueMsgNumber != -1 && msg.QueueMessageNo <= QueueMsgNumber {
 		// Duplicate or already processed message, resend acknowledgment
-		log.Printf("Duplicate or already processed message: QueueMessageNo %d\n", msg.QueueMessageNo)
+		logger.Warn("Duplicate or already processed message received",
+			zap.Int("queueMessageNo", msg.QueueMessageNo),
+		)
 		ack := ToServerAckMessage{
 			BaseMessage: BaseMessage{
 				Topic:  topic,
@@ -261,18 +316,29 @@ func handleServerSend(msg ServerSendMessage, conn *websocket.Conn) {
 		}
 		ackJSON, err := json.Marshal(ack)
 		if err != nil {
-			log.Printf("Failed to encode acknowledgment for duplicate QueueMessageNo %d: %v\n", msg.QueueMessageNo, err)
+			logger.Error("Failed to encode acknowledgment for duplicate message",
+				zap.Int("queueMessageNo", msg.QueueMessageNo),
+				zap.Error(err),
+			)
 			return
 		}
 
 		// Resend acknowledgment
 		if err := conn.WriteMessage(websocket.TextMessage, ackJSON); err != nil {
-			log.Printf("Failed to resend acknowledgment for QueueMessageNo %d: %v\n", msg.QueueMessageNo, err)
+			logger.Error("Failed to resend acknowledgment for duplicate message",
+				zap.Int("queueMessageNo", msg.QueueMessageNo),
+				zap.Error(err),
+			)
 		} else {
-			fmt.Printf("Resent acknowledgment for QueueMessageNo %d\n", msg.QueueMessageNo)
+			logger.Info("Resent acknowledgment for duplicate message",
+				zap.Int("queueMessageNo", msg.QueueMessageNo),
+			)
 		}
 	} else {
-		log.Printf("Out-of-order message received: QueueMessageNo %d (expected %d)\n", msg.QueueMessageNo, QueueMsgNumber+1)
+		logger.Warn("Out-of-order message received",
+			zap.Int("received", msg.QueueMessageNo),
+			zap.Int("expected", QueueMsgNumber+1),
+		)
 	}
 	serverQueueMutex.Unlock()
 }
@@ -287,13 +353,39 @@ func resendUnackedMessages(conn *websocket.Conn) {
 			bufferMutex.Unlock()
 			continue
 		}
-		nextMsg := UnackedClientMessageBuffer[LastAckedClientMsgNumber+1]
-		log.Printf("Resending unacknowledged message: %+v\n", nextMsg)
+		nextMsg, exists := UnackedClientMessageBuffer[LastAckedClientMsgNumber+1]
+		if !exists {
+			logger.Warn("Next unacknowledged message not found in buffer",
+				zap.Int("expectedMessageNo", LastAckedClientMsgNumber+1),
+			)
+			bufferMutex.Unlock()
+			continue
+		}
+
+		logger.Info("Resending unacknowledged message",
+			zap.Int("clientMessageNo", nextMsg.ClientMessageNo),
+			zap.String("topic", nextMsg.Topic),
+			zap.String("data", nextMsg.Data),
+		)
+
 		messageJSON, err := json.Marshal(nextMsg)
 		if err != nil {
-			fmt.Printf("failed to encode message: %v\n", err)
+			logger.Error("Failed to encode unacknowledged message",
+				zap.Int("clientMessageNo", nextMsg.ClientMessageNo),
+				zap.Error(err),
+			)
 		}
-		conn.WriteMessage(websocket.TextMessage, messageJSON)
+		// Send the message
+		if err := conn.WriteMessage(websocket.TextMessage, messageJSON); err != nil {
+			logger.Error("Failed to resend unacknowledged message",
+				zap.Int("clientMessageNo", nextMsg.ClientMessageNo),
+				zap.Error(err),
+			)
+		} else {
+			logger.Info("Successfully resent unacknowledged message",
+				zap.Int("clientMessageNo", nextMsg.ClientMessageNo),
+			)
+		}
 		bufferMutex.Unlock()
 	}
 }
